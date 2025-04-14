@@ -6,12 +6,21 @@ from PyPDF2 import PdfReader
 import markdown
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
 app = FastAPI(
     title="학습 보조 서버",
     description="PDF 문서를 분석하여 필요한 부분을 마크다운 형태로 변환하는 서버",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['http://localhost:8080'],
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*']
 )
 
 @app.on_event("startup")
