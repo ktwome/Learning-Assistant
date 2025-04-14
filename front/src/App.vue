@@ -1,6 +1,9 @@
 <template>
   <v-app>
-    <RouterView/>
+    <VAppBar>aa</VAppBar>
+    <VMain>
+      <RouterView/>
+    </VMain>
   </v-app>
 </template>
 

@@ -1,23 +1,27 @@
 <template>
     <v-container>
-      <v-card class="mx-auto" max-width="600">
-        <v-card-title>PDF 파일 업로드</v-card-title>
-        <v-card-text>
-          <v-file-input
-            v-model="pdfFile"
-            label="PDF 파일 선택"
-            accept=".pdf"
-            show-size
-            outlined
-          />
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn color="primary" :disabled="!pdfFile" @click="uploadFile">
-            업로드
-          </v-btn>
-        </v-card-actions>
-      </v-card>
+        <v-card class="mx-auto" max-width="600">
+            <v-card-title>마크다운 변환 페이지</v-card-title>
+            <v-card-title>PDF 파일 업로드</v-card-title>
+            <v-card-text>
+                <v-file-input
+                v-model="pdfFile"
+                label="PDF 파일 선택"
+                accept=".pdf"
+                show-size
+                outlined
+                />
+            </v-card-text>
+            <v-card-actions>
+                <v-btn color="error" variant="tonal" to="/">
+                홈으로
+                </v-btn>
+                <v-spacer />
+                <v-btn color="primary" :disabled="!pdfFile" @click="uploadFile">
+                업로드
+                </v-btn>
+            </v-card-actions>
+        </v-card>
     </v-container>
   </template>
   
