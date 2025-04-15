@@ -8,25 +8,30 @@
   </v-overlay>
 
   <!-- 업로드 카드 -->
-  <v-container>
-    <v-card class="mx-auto" max-width="600">
-      <v-card-title class="text-h6">📄 마크다운 변환 페이지</v-card-title>
+  <v-container class="fill-height d-flex justify-center align-center">
+    <v-card class="pa-6" max-width="600" elevation="4">
+      <v-card-title class="text-h6 font-weight-bold mb-2">
+        📄 PDF → Markdown 변환
+      </v-card-title>
 
-      <v-card-text>
-        <v-file-input
-          v-model="pdfFile"
-          label="PDF 파일 선택"
-          accept=".pdf"
-          show-size
-          outlined
-        />
+      <v-card-text class="mb-4">
+        PDF 강의자료를 업로드하면 구조화된 Markdown으로 자동 변환됩니다.
       </v-card-text>
 
-      <v-card-actions>
-        <v-btn color="error" variant="tonal" to="/">
-          홈으로
+      <v-file-input
+        v-model="pdfFile"
+        label="PDF 파일 선택"
+        accept=".pdf"
+        show-size
+        outlined
+        clearable
+        class="mb-4"
+      />
+
+      <v-card-actions class="d-flex justify-space-between">
+        <v-btn color="grey-darken-1" variant="tonal" to="/" :disabled="loading">
+          ← 홈으로
         </v-btn>
-        <v-spacer />
         <v-btn color="primary" :disabled="!pdfFile || loading" @click="uploadFile">
           업로드
         </v-btn>
@@ -35,7 +40,6 @@
   </v-container>
 </template>
 
-  
 <script>
 import axios from 'axios'
 
@@ -49,21 +53,22 @@ export default {
   },
   methods: {
     async uploadFile() {
+      if (!this.pdfFile) return
       const formData = new FormData()
       formData.append('file', this.pdfFile)
       this.loading = true
 
       try {
-        const res = await axios.post('http://localhost:8000/preprocess-pdf', formData, {
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
+        const res = await axios.post('http://localhost:8000/pdfs', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
         })
 
         if (res.status === 200 && res.data.success) {
-          localStorage.setItem('markdown', res.data.markdown)
-          this.$router.push({ path: '/result' })
-        }   
+          const pdfId = res.data.id
+          this.$router.push(`/view/${pdfId}`)
+        } else {
+          throw new Error('서버 응답 오류')
+        }
       } catch (err) {
         console.error('업로드 실패:', err)
         alert('파일 업로드에 실패했습니다.')
@@ -74,3 +79,9 @@ export default {
   },
 }
 </script>
+
+<style scoped>
+.fill-height {
+  min-height: calc(100vh - 64px);
+}
+</style>

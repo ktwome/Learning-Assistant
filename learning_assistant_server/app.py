@@ -1,26 +1,25 @@
-import os
+import os, uuid, pathlib, asyncio
+from datetime import datetime
 from typing import List
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
-from PyPDF2 import PdfReader
-import markdown
-from pydantic import BaseModel
-from dotenv import load_dotenv
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, status, Response
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+from PyPDF2 import PdfReader
+
+from sqlmodel import SQLModel, Field, create_engine, Session, select
 from langchain_ollama import OllamaLLM
 from langchain.prompts import PromptTemplate
-import asyncio
 
-# ============================
-# FastAPI 생애주기 관련 세팅
-# ============================
+from pydantic import BaseModel 
 
-def start():
-    print('백엔드 서버가 실행되었습니다.')
-
-def shutdown():
-    print('백엔드 서버가 종료되었습니다.')
+# ──────────────────────────────
+# Lifespan
+# ──────────────────────────────
+def start():    print("백엔드 서버가 실행되었습니다.")
+def shutdown(): print("백엔드 서버가 종료되었습니다.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,161 +27,258 @@ async def lifespan(app: FastAPI):
     yield
     shutdown()
 
-
-# ============================
-# FastAPI 사전 설정 정의
-# ============================
-
-# 환경변수 호출
+# ──────────────────────────────
+# FastAPI & CORS
+# ──────────────────────────────
 load_dotenv()
 
-# FastAPI 세팅
 app = FastAPI(
     title="학습 보조 서버",
-    description="PDF 문서를 분석하여 필요한 부분을 마크다운 형태로 변환하는 서버",
-    lifespan=lifespan
+    description="PDF를 Markdown 으로 변환하고 보관하는 API",
+    lifespan=lifespan,
 )
 
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:8080'],
+    allow_origins=["http://localhost:8080"],
     allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*']
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# ──────────────────────────────
+# Database (SQLite → 교체 가능)
+# ──────────────────────────────
+engine = create_engine("sqlite:///./db.sqlite3")
+DATA_DIR = pathlib.Path("data")
+DATA_DIR.mkdir(exist_ok=True)
 
-# ============================
+class MdDoc(SQLModel, table=True):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex, primary_key=True)
+    pdf_name: str
+    title: str 
+    md_path: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+SQLModel.metadata.create_all(engine)
+
+# ──────────────────────────────
 # LLM 세팅
-# ============================
-
-MODEL_NAME = "exaone3.5:7.8b" 
-OLLAMA_URL = "http://localhost:11434"
-
+# ──────────────────────────────
 llm = OllamaLLM(
-    model=MODEL_NAME,
-    base_url=OLLAMA_URL,
+    model=os.getenv("MODEL_NAME", "exaone3.5:7.8b"),
+    base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
     temperature=0,
-    max_tokens=1024
+    max_tokens=1024,
 )
 
 page_prompt = PromptTemplate(
-    input_variables=["text", "page"],
+    input_variables=["text", 'page'],
     template="""
-        당신은 PDF 슬라이드를 구조화된 마크다운으로 정돈하는 도우미입니다.
+당신은 대학 강의 슬라이드를 **깔끔한 마크다운**으로 정돈하는 전문가입니다.
 
-        규칙
-        1. 첫 줄을 그 페이지의 핵심 소제목으로 하여 `## 소제목` 형식으로 작성.
-        - 적절한 소제목이 없다면 핵심 키워드를 5단어 이내로 생성.
-        2. 원문 순서를 존중하되, 불필요한 공백·중복·풋터·슬라이드 번호를 제거.
-        3. 글머리표(•, -, ‣)는 `-` 로 통일, 번호 목록은 유지.
-        4. 표/코드는 ```markdown 블록```으로 감싸지 말고 그대로 두기.
-        5. PDF 문서 변환외의 불필요한 첨언을 하지마세요. (ex. 이 마크다운 형식은... 절대 금지)
+──────────────────────────
+💡 **변환 규칙 (필수)**  
+1. **제목 추출**
+   1) 슬라이드 안에서 ‘강의명·장 제목·단원 제목’처럼 가장 상위 의미를 갖는 구절을 찾아
+      `## 제목` 1줄로 작성한다.  
+   2) 만약 제목이 슬라이드 하단이나 중간에 있어도 **반드시 맨 위**로 이동한다.  
+   3) 5 단어 이하, 불필요한 번호·영문 “Page”·학교명·저자명 제거.
 
-        정돈되지 않은 PDF 슬라이드:
+2. **본문 정돈**
+   - 하위 소제목이 있으면 `### 소제목` 형태로 유지한다.  
+   - 글머리 기호는 모두 `-` 로 통일, 번호 목록(1. 2. 3.)은 유지한다.  
+   - 연속 빈 줄은 하나로 줄인다.
 
-        {text}
+3. **잡음 제거 (삭제 대상)**
+   - “Page \d+”, “DAEJEON UNIVERSITY”, “Copyright ⓒ …” 등  
+   - 슬라이드 번호·풋터·머리글·로고·이메일·날짜·저자 직위  
+   - “강의 운영 안내”처럼 **제목과 중복**되는 구문이 본문에 또 나오면 삭제.
 
-        변환된 마크다운:
-    """
+4. **포맷**
+   - 표나 코드 블록은 ``` 없이 **그대로** 둔다.  
+   - 출력은 **마크다운 본문만** 제공하며, 추가 설명·서문·후문 금지.
+
+──────────────────────────
+다음은 원본 슬라이드 텍스트입니다.  
+(이미 페이지 {page} 로 구분되어 있으므로 추가 페이지 표시는 하지 마세요)
+
+{text}
+
+──────────────────────────
+이제 위 내용을 규칙에 맞춰 정돈된 **마크다운**으로만 출력하세요.
+"""
 )
 
-# 3개로 LLM 동시 호출 제한
-sem = asyncio.Semaphore(3)
+sem = asyncio.Semaphore(3)  # 동시 LLM 호출 제한
 
+# ──────────────────────────────
+# 내부 유틸
+# ──────────────────────────────
+import re
+TITLE_RE = re.compile(r"^\s*##\s+(.*)", re.MULTILINE)
 
-# ============================
-# API 관련 함수들
-# ============================
+def extract_title(md_text: str, fallback: str) -> str:
+    """첫 `##` 헤더를 제목으로 사용, 없으면 파일명으로 대체"""
+    m = TITLE_RE.search(md_text)
+    return m.group(1).strip() if m else fallback
 
-# PDF 페이지 -> 페이지 별 텍스트 리스트
 def extract_pages(file: UploadFile) -> List[str]:
-    """PDF 페이지별 원문 텍스트 리스트 반환"""
     file.file.seek(0)
     reader = PdfReader(file.file)
-
     return [p.extract_text() or "" for p in reader.pages]
 
-# 페이지 텍스트 -> 구조화된 Markdown
 async def refine_page(idx: int, raw: str) -> str:
-    """LLM으로 페이지 하나를 구조화 MD로 변환"""
     if not raw.strip():
         return ""
-    
     prompt = page_prompt.format(text=raw, page=str(idx + 1))
     async with sem:
-        md = await llm.apredict(prompt)   # OllamaLLM 비동기 호출
+        md = await llm.apredict(prompt)
+    return md.strip()
 
-    return f"\n{md.strip()}"
+async def pdf_to_markdown(file: UploadFile) -> str:
+    pages_raw = extract_pages(file)
+    tasks = [refine_page(i, t) for i, t in enumerate(pages_raw)]
+    md_pages = await asyncio.gather(*tasks)
+    return "\n\n---\n\n".join(p for p in md_pages if p)
 
-# 통합 과정
-async def generate_markdown(pdf_file: UploadFile) -> str:
-    """
-    1) PDF 페이지 추출
-    2) 각 페이지를 LLM으로 구조화
-    3) 구분선(---)으로 연결해 하나의 MD 반환
-    """
-    pages_raw = extract_pages(pdf_file)
+# ──────────────────────────────
+# Pydantic 응답 모델
+# ──────────────────────────────
+class PdfMeta(BaseModel):
+    id: str
+    pdf_name: str
+    title: str  
+    created_at: datetime
 
-    tasks = [
-        refine_page(i, text) for i, text in enumerate(pages_raw)
-    ]
-    md_pages = await asyncio.gather(*tasks)      # 병렬 처리
-    full_md = "\n\n---\n\n".join(md for md in md_pages if md)
-    return full_md
+class CreatePdfResp(BaseModel):
+    success: bool
+    id: str
+    pdf_name: str
+    title: str
+    created_at: datetime
 
-
-# ============================
-# 응답 스키마 모델 정의
-# ============================
-
-class PreProcessPDFSuccessResponse(BaseModel):
-    """
-    analyze_pdf response가 성공적일 경우의 스키마 모델
-    """
+class MarkdownResp(BaseModel):
     success: bool
     markdown: str
-    html_preview: str
 
-
-class PreProcessPDFFailResponse(BaseModel):
-    """
-    analyze_pdf response가 실패했을 경우의 스키마 모델
-    """
+class ErrorResp(BaseModel):
     success: bool
     error: str
 
-
-
-# ============================
-# 실제 API 처리 함수들
-# ============================
-
+# ──────────────────────────────
+# API 엔드포인트
+# ──────────────────────────────
 @app.post(
-    "/preprocess-pdf",
-    response_model=PreProcessPDFSuccessResponse,
-    responses={
-        500: {"model": PreProcessPDFFailResponse, "description": "내부 서버 오류"}
-    },
+    "/pdfs",
+    response_model=CreatePdfResp,
+    responses={500: {"model": ErrorResp}},
 )
-async def preprocess_pdf(file: UploadFile = File(...)):
-    """
-    PDF 텍스트를 마크다운으로 변환하여 반환합니다.
-    """
+async def create_pdf(file: UploadFile = File(...)):
+    """PDF 업로드 → 페이지별 Markdown 변환 → 저장"""
     try:
-        md_text = await generate_markdown(file)
-        html_preview = markdown.markdown(md_text)
+        md_text = await pdf_to_markdown(file)
+
+        # 제목 추출
+        title = extract_title(md_text, pathlib.Path(file.filename).stem)
+
+        # 저장
+        doc_id = uuid.uuid4().hex
+        md_path = DATA_DIR / f"{doc_id}.md"
+        md_path.write_text(md_text, encoding="utf-8")
+
+        with Session(engine) as db:
+            db.add(
+                MdDoc(
+                    id=doc_id,
+                    pdf_name=file.filename,
+                    title=title,          # ★ 저장
+                    md_path=str(md_path),
+                )
+            )
+            db.commit()
+
         return {
             "success": True,
-            "markdown": md_text,
-            "html_preview": html_preview
+            "id": doc_id,
+            "pdf_name": file.filename,
+            "title": title,
+            "created_at": datetime.utcnow()
         }
+    
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+
+@app.get("/pdfs", response_model=List[PdfMeta])
+def list_pdfs():
+    '''
+    전체 PDF 파일을 조회
+    '''
+    with Session(engine) as db:
+        return db.exec(select(MdDoc).order_by(MdDoc.created_at.desc())).all()
+
+
+@app.get(
+    "/pdfs/{pdf_id}/markdown",
+    response_model=MarkdownResp,
+    responses={404: {"model": ErrorResp}},
+)
+def get_markdown(pdf_id: str):
+    '''
+    pdf_id에 해당하는 마크다운을 조회
+    '''
+    with Session(engine) as db:
+        doc = db.get(MdDoc, pdf_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Not found")
+
+    md_text = pathlib.Path(doc.md_path).read_text(encoding="utf-8")
+    return {"success": True, "markdown": md_text}
+
+
+@app.get(
+    "/pdfs/{pdf_id}/download",
+    responses={404: {"model": ErrorResp}},
+)
+def download_markdown(pdf_id: str):
+    '''
+    pdf_id에 해당하는 마크다운 파일을 저장
+    '''
+    with Session(engine) as db:
+        doc = db.get(MdDoc, pdf_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Not found")
+
+    return FileResponse(
+        path=doc.md_path,
+        media_type="text/markdown",
+        filename=f"{pathlib.Path(doc.pdf_name).stem}.md",
+    )
+
+@app.delete(
+    "/pdfs/{pdf_id}",
+    status_code=status.HTTP_204_NO_CONTENT,   # 204 No Content
+    responses={404: {"model": ErrorResp}},
+)
+def delete_pdf(pdf_id: str):
+    """
+    pdf_id에 해당하는 Markdown 파일과 메타데이터 삭제
+    """
+    with Session(engine) as db:
+        doc = db.get(MdDoc, pdf_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Not found")
+
+        # ① DB 레코드 삭제
+        db.delete(doc)
+        db.commit()
+
+    # ② 물리 파일 삭제(예외 무시)
+    try:
+        pathlib.Path(doc.md_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    # 204 응답
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
