@@ -17,6 +17,15 @@
 <script>
 import { marked } from 'marked'
 
+// marked 설정 (코드블럭을 일반 div로 처리)
+marked.use({
+  renderer: {
+    code(code) {
+      return `<div class="markdown-code-block">${code}</div>`
+    }
+  }
+})
+
 export default {
   name: 'ResultView',
   data() {
@@ -25,22 +34,42 @@ export default {
     }
   },
   mounted() {
-    try {
-      const rawMarkdown = localStorage.getItem('markdown')
-      if (rawMarkdown) {
-        this.markdownHtml = marked.parse(rawMarkdown)
+  try {
+    let raw = localStorage.getItem('markdown')
+
+    // 코드 블럭 제거 (옵션)
+    raw = raw.replace(/```[a-zA-Z]*\n?([\s\S]*?)```/g, (_, content) => content)
+
+    marked.use({
+      renderer: {
+        code(code) {
+          return `<div class="markdown-code-block">${code}</div>`
+        }
       }
-    } catch (err) {
-      console.error('Markdown 렌더링 실패:', err)
-    }
+    })
+
+    this.markdownHtml = marked.parse(raw)
+  } catch (err) {
+    console.error('Markdown 렌더링 실패:', err)
   }
+}
+
 }
 </script>
 
+
 <style scoped>
-.markdown-rendered {
-  font-family: 'Segoe UI', sans-serif;
-  line-height: 1.7;
-  white-space: pre-wrap;
-}
+  .markdown-rendered {
+    font-family: 'Segoe UI', sans-serif;
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+  .markdown-code-block {
+    background: #f5f5f5;
+    padding: 1em;
+    border-radius: 4px;
+    margin: 1em 0;
+    font-family: 'Courier New', monospace;
+    white-space: pre-wrap;
+  }
 </style>
